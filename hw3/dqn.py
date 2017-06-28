@@ -126,8 +126,33 @@ def learn(env,
     # q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
     # Older versions of TensorFlow may require using "VARIABLES" instead of "GLOBAL_VARIABLES"
     ######
-    
+
     # YOUR CODE HERE
+
+    # Create networks
+    q_values = q_func(obs_t_float, num_actions, scope='q_func', reuse=False)
+    q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
+    # The target network will evalueate tp1 observations
+    target_q_values = q_func(obs_tp1_float, num_actions, scope='target_q_func', reuse=False)
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_q_func')
+
+    # Choose only the q values for selected actions
+    # First way
+#    batch_size = tf.shape(obs_t_ph)[0]
+#    chosen_actions = tf.range(batch_size) * num_actions + act_t_ph
+#    chosen_q_values = tf.gather(tf.reshape(q_values, [-1]), chosen_actions)
+
+    # Second way
+    onehot_actions = tf.one_hot(act_t_ph, num_actions)
+    q_t = tf.reduce_sum(tf.multiply(q_values, onehot_actions), axis=1)
+
+    # Calculate errors
+    q_tp1 = tf.reduce_max(target_q_values, axis=1)
+    td_target = rew_t_ph + (1 - done_mask_ph) * gamma * q_tp1
+    # I would normally compute the squared difference between the td_target and
+    # q_t here, but I'm going to use huber loss instead
+    errors = huber_loss(tf.subtract(q_t, td_target))
+    total_error = tf.reduce_mean(errors)
 
     ######
 
@@ -193,7 +218,7 @@ def learn(env,
         # might as well be random, since you haven't trained your net...)
 
         #####
-        
+
         # YOUR CODE HERE
 
         #####
@@ -243,7 +268,7 @@ def learn(env,
             # you should update every target_update_freq steps, and you may find the
             # variable num_param_updates useful for this (it was initialized to 0)
             #####
-            
+
             # YOUR CODE HERE
 
             #####
