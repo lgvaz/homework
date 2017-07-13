@@ -1,3 +1,4 @@
+import os
 import sys
 import gym.spaces
 import itertools
@@ -7,6 +8,9 @@ import tensorflow                as tf
 import tensorflow.contrib.layers as layers
 from collections import namedtuple
 from dqn_utils import *
+import matplotlib.pyplot as plt
+from matplotlib import style
+style.use('ggplot')
 
 OptimizerSpec = namedtuple("OptimizerSpec", ["constructor", "kwargs", "lr_schedule"])
 
@@ -76,6 +80,36 @@ def learn(env,
     """
     assert type(env.observation_space) == gym.spaces.Box
     assert type(env.action_space)      == gym.spaces.Discrete
+
+    ####################
+    # Create summaries #
+    ####################
+    logdir = 'logs'
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
+    writer = tf.summary.FileWriter(logdir)
+
+    mean_reward_ph = tf.placeholder(name='mean_reward',
+                                 shape=(),
+                                 dtype=tf.float32)
+    best_reward_ph = tf.placeholder(name='best_reward',
+                                 shape=(),
+                                 dtype=tf.float32)
+    learning_rate_ph = tf.placeholder(name='learning_rate',
+                                 shape=(),
+                                 dtype=tf.float32)
+    exploration_rate_ph = tf.placeholder(name='exploration_rate',
+                                 shape=(),
+                                 dtype=tf.float32)
+
+    tf.summary.scalar('mean_reward', mean_reward_ph)
+    tf.summary.scalar('best_reward', best_reward_ph)
+    tf.summary.scalar('learning_rate', learning_rate_ph)
+    tf.summary.scalar('exploration_rate', exploration_rate_ph)
+
+    merged = tf.summary.merge_all()
+
+
 
     ###############
     # BUILD MODEL #
@@ -178,7 +212,7 @@ def learn(env,
     model_initialized = False
     num_param_updates = 0
     mean_episode_reward      = -float('nan')
-    best_mean_episode_reward = -float('inf')
+    best_mean_episode_reward = -21
     last_obs = env.reset()
     LOG_EVERY_N_STEPS = 10000
 
@@ -221,6 +255,26 @@ def learn(env,
 
         # YOUR CODE HERE
 
+        # Add observation to replay buffer
+        buffer_idx = replay_buffer.store_frame(last_obs)
+        state = replay_buffer.encode_recent_observation()[np.newaxis]
+
+        # Perform epsilon greedy exploration
+        if model_initialized == False or np.random.rand(1) < exploration.value(t):
+            action = env.action_space.sample()
+        else:
+            action_values = session.run(q_values, feed_dict={obs_t_ph: state})
+            action = np.argmax(action_values)
+
+        # Perform the action
+        obs, reward, done, _ = env.step(action)
+        replay_buffer.store_effect(buffer_idx, action, reward, done)
+
+        if done:
+            last_obs = env.reset()
+        else:
+            last_obs = obs
+
         #####
 
         # at this point, the environment should have been advanced one step (and
@@ -241,27 +295,7 @@ def learn(env,
             # next observations, and done indicator).
             # 3.b: initialize the model if it has not been initialized yet; to do
             # that, call
-            #    initialize_interdependent_variables(session, tf.global_variables(), {
-            #        obs_t_ph: obs_t_batch,
-            #        obs_tp1_ph: obs_tp1_batch,
-            #    })
-            # where obs_t_batch and obs_tp1_batch are the batches of observations at
-            # the current and next time step. The boolean variable model_initialized
-            # indicates whether or not the model has been initialized.
-            # Remember that you have to update the target network too (see 3.d)!
-            # 3.c: train the model. To do this, you'll need to use the train_fn and
-            # total_error ops that were created earlier: total_error is what you
-            # created to compute the total Bellman error in a batch, and train_fn
-            # will actually perform a gradient step and update the network parameters
-            # to reduce total_error. When calling session.run on these you'll need to
-            # populate the following placeholders:
-            # obs_t_ph
-            # act_t_ph
-            # rew_t_ph
-            # obs_tp1_ph
-            # done_mask_ph
-            # (this is needed for computing total_error)
-            # learning_rate -- you can get this from optimizer_spec.lr_schedule.value(t)
+            #    initialize_interdependent_variables(learning_rate -- you can get this from optimizer_spec.lr_schedule.value(t)
             # (this is needed by the optimizer to choose the learning rate)
             # 3.d: periodically update the target network by calling
             # session.run(update_target_fn)
@@ -270,6 +304,34 @@ def learn(env,
             #####
 
             # YOUR CODE HERE
+
+            # Sample batch from replay buffer
+            obs_t_batch, act_t_batch, rew_t_batch, obs_tp1_batch, done_mask_batch = replay_buffer.sample(batch_size)
+
+            # Initialize model
+            if model_initialized == False:
+                print('Initializing model...')
+                model_initialized = True
+                initialize_interdependent_variables(session, tf.global_variables(), {
+                    obs_t_ph: obs_t_batch,
+                    obs_tp1_ph: obs_tp1_batch,
+                })
+
+            # Perform gradient descent
+            session.run(train_fn, feed_dict={
+                obs_t_ph: obs_t_batch,
+                act_t_ph: act_t_batch,
+                rew_t_ph: rew_t_batch,
+                obs_tp1_ph: obs_tp1_batch,
+                done_mask_ph: done_mask_batch,
+                learning_rate: optimizer_spec.lr_schedule.value(t)
+            })
+
+            # Update target network
+            if t % target_update_freq == 0:
+                session.run(update_target_fn)
+                num_param_updates += 1
+                print('Update target network {}'.format(num_param_updates))
 
             #####
 
@@ -287,3 +349,12 @@ def learn(env,
             print("exploration %f" % exploration.value(t))
             print("learning_rate %f" % optimizer_spec.lr_schedule.value(t))
             sys.stdout.flush()
+
+            feed_dict = {
+                mean_reward_ph: mean_episode_reward,
+                best_reward_ph: best_mean_episode_reward,
+                learning_rate_ph: optimizer_spec.lr_schedule.value(t),
+                exploration_rate_ph: exploration.value(t)
+            }
+            summary = session.run(merged, feed_dict=feed_dict)
+            writer.add_summary(summary, t)
