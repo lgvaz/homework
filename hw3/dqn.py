@@ -107,7 +107,6 @@ def learn(env,
     tf.summary.scalar('learning_rate', learning_rate_ph)
     tf.summary.scalar('exploration_rate', exploration_rate_ph)
 
-    merged = tf.summary.merge_all()
 
 
 
@@ -170,6 +169,11 @@ def learn(env,
     target_q_values = q_func(obs_tp1_float, num_actions, scope='target_q_func', reuse=False)
     target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_q_func')
 
+    tf.summary.scalar('Q_mean', tf.reduce_mean(q_values))
+    tf.summary.scalar('Q_max', tf.reduce_max(q_values))
+    tf.summary.histogram('Q_values', q_values)
+
+    merged = tf.summary.merge_all()
     # Choose only the q values for selected actions
     # First way
 #    batch_size = tf.shape(obs_t_ph)[0]
@@ -354,7 +358,8 @@ def learn(env,
                 mean_reward_ph: mean_episode_reward,
                 best_reward_ph: best_mean_episode_reward,
                 learning_rate_ph: optimizer_spec.lr_schedule.value(t),
-                exploration_rate_ph: exploration.value(t)
+                exploration_rate_ph: exploration.value(t),
+                obs_t_ph: obs_t_batch
             }
             summary = session.run(merged, feed_dict=feed_dict)
             writer.add_summary(summary, t)
