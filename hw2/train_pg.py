@@ -35,11 +35,15 @@ def build_mlp(
 
     with tf.variable_scope(scope):
         # YOUR_CODE_HERE
-        pass
+        net = input_placeholder
+        for i_layer in range(n_layers):
+            net = tf.layers.dense(net, size, activation=activation)
+        output = tf.layers.dense(net, output_size, activation=output_activation)
+
+        return output
 
 def pathlength(path):
     return len(path["reward"])
-
 
 
 #============================================================================================#
@@ -123,7 +127,7 @@ def train_PG(exp_name='',
         sy_ac_na = tf.placeholder(shape=[None, ac_dim], name="ac", dtype=tf.float32) 
 
     # Define a placeholder for advantages
-    sy_adv_n = TODO
+    sy_adv_n = tf.placeholder(shape=[None], name='ad', dtype=tf.float32)
 
 
     #========================================================================================#
@@ -167,9 +171,9 @@ def train_PG(exp_name='',
 
     if discrete:
         # YOUR_CODE_HERE
-        sy_logits_na = TODO
-        sy_sampled_ac = TODO # Hint: Use the tf.multinomial op
-        sy_logprob_n = TODO
+        sy_logits_na = build_mlp(sy_ob_no, ac_dim, 'network', n_layers=n_layers, size=size)
+        sy_sampled_ac = tf.multinomial(sy_logits_na, tf.shape(sy_ob_no)[0])
+        sy_logprob_n = tf.nn.log_softmax(sy_logits_na)
 
     else:
         # YOUR_CODE_HERE
@@ -185,7 +189,8 @@ def train_PG(exp_name='',
     # Loss Function and Training Operation
     #========================================================================================#
 
-    loss = TODO # Loss function that we'll differentiate to get the policy gradient.
+    selected_logprobs = tf.reduce_sum(tf.one_hot(sy_ac_na, ac_dim) * sy_logprob_n, axis=1)
+    loss = - tf.reduce_sum(selected_logprobs * sy_adv_n)
     update_op = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
 
@@ -242,7 +247,7 @@ def train_PG(exp_name='',
                     time.sleep(0.05)
                 obs.append(ob)
                 ac = sess.run(sy_sampled_ac, feed_dict={sy_ob_no : ob[None]})
-                ac = ac[0]
+                ac = np.squeeze(ac)
                 acs.append(ac)
                 ob, rew, done, _ = env.step(ac)
                 rewards.append(rew)
@@ -317,7 +322,20 @@ def train_PG(exp_name='',
         #====================================================================================#
 
         # YOUR_CODE_HERE
-        q_n = TODO
+        all_returns = []
+        for path in paths:
+            partial_returns = []
+            reward_sum = 0
+            for reward in reversed(path['reward']):
+                reward_sum = reward + gamma * reward_sum
+                partial_returns.append(reward_sum)
+            all_returns.append(partial_returns[::-1])
+
+        if reward_to_go:
+            q_n = np.hstack(all_returns)
+        else:
+            q_n = [path[0] for path in all_returns for _ in path]
+
 
         #====================================================================================#
         #                           ----------SECTION 5----------
@@ -347,7 +365,7 @@ def train_PG(exp_name='',
             # On the next line, implement a trick which is known empirically to reduce variance
             # in policy gradient methods: normalize adv_n to have mean zero and std=1. 
             # YOUR_CODE_HERE
-            pass
+            adv_n = (adv_n - np.mean(adv_n)) / (np.std(adv_n) + 1e-7)
 
 
         #====================================================================================#
@@ -380,6 +398,8 @@ def train_PG(exp_name='',
         # and after an update, and then log them below. 
 
         # YOUR_CODE_HERE
+        feed_dict = {sy_ob_no: ob_no, sy_ac_na: ac_na, sy_adv_n: adv_n}
+        sess.run(update_op, feed_dict=feed_dict)
 
 
         # Log diagnostics
