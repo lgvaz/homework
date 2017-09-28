@@ -171,17 +171,33 @@ def train_PG(exp_name='',
 
     if discrete:
         # YOUR_CODE_HERE
-        sy_logits_na = build_mlp(sy_ob_no, ac_dim, 'network', n_layers=n_layers, size=size)
+        sy_logits_na = build_mlp(sy_ob_no, ac_dim, 'discrete', n_layers=n_layers, size=size)
         sy_sampled_ac = tf.multinomial(sy_logits_na, tf.shape(sy_ob_no)[0])
         sy_logprob_n = tf.nn.log_softmax(sy_logits_na)
+        sy_logprob_n = tf.reduce_sum(tf.one_hot(sy_ac_na, ac_dim) * sy_logprob_n, axis=1)
 
     else:
         # YOUR_CODE_HERE
-        sy_mean = TODO
-        sy_logstd = TODO # logstd should just be a trainable variable, not a network output.
-        sy_sampled_ac = TODO
-        sy_logprob_n = TODO  # Hint: Use the log probability under a multivariate gaussian. 
+        sy_mean = build_mlp(sy_ob_no, ac_dim, 'continous', n_layers=n_layers, size=size)
+        sy_logstd = tf.get_variable('logstd', shape=[ac_dim], dtype=tf.float32)
+        # sy_sampled_ac = sy_mean + tf.exp(sy_logstd) * tf.random_normal(tf.shape(sy_mean))
+        # sy_logprob_n = TODO  # Hint: Use the log probability under a multivariate gaussian. 
+        # sy_logprob_n = - 0.5 * tf.reduce_sum(tf.square(sy_ac_na - sy_mean) / tf.square(tf.exp(sy_logstd)), axis=1) \
+        # - ac_dim / 2 * tf.log(2 * np.pi) - tf.reduce_sum(sy_logstd)
 
+        # reduce_stds = -tf.reduce_sum(sy_logstd)
+        # reduce_sqs = tf.multiply(tf.constant(-0.5),
+        #                   tf.reduce_sum(tf.square(
+        #                   tf.divide(tf.subtract(sy_mean, sy_ac_na),
+        #                             tf.exp(sy_logstd))), axis=1))
+        # sy_logprob_n = tf.add(reduce_stds, reduce_sqs)
+
+        # sy_sampled_ac = sy_mean + tf.exp(sy_logstd) * \
+        #                        tf.random_normal(tf.shape(sy_mean))
+
+        normal_dist = tf.contrib.distributions.Normal(tf.squeeze(sy_mean), tf.squeeze(tf.exp(sy_logstd)))
+        sy_sampled_ac = normal_dist._sample_n(1)
+        sy_logprob_n = normal_dist.log_prob(sy_ac_na)
 
 
     #========================================================================================#
@@ -189,8 +205,7 @@ def train_PG(exp_name='',
     # Loss Function and Training Operation
     #========================================================================================#
 
-    selected_logprobs = tf.reduce_sum(tf.one_hot(sy_ac_na, ac_dim) * sy_logprob_n, axis=1)
-    loss = - tf.reduce_sum(selected_logprobs * sy_adv_n)
+    loss = - tf.reduce_sum(sy_logprob_n * sy_adv_n)
     update_op = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
 
@@ -247,7 +262,7 @@ def train_PG(exp_name='',
                     time.sleep(0.05)
                 obs.append(ob)
                 ac = sess.run(sy_sampled_ac, feed_dict={sy_ob_no : ob[None]})
-                ac = np.squeeze(ac)
+                # ac = np.squeeze(ac)
                 acs.append(ac)
                 ob, rew, done, _ = env.step(ac)
                 rewards.append(rew)
