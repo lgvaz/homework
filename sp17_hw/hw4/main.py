@@ -85,7 +85,28 @@ class LinearValueFunction(object):
         return np.concatenate([np.ones([X.shape[0], 1]), X, np.square(X)/2.0], axis=1)
 
 class NnValueFunction(object):
-    pass # YOUR CODE HERE
+    def __init__(self, ob_dim):
+        self.sy_ob_no = tf.placeholder(name='obs', shape=[None, ob_dim], dtype=tf.float32)
+        self.sy_vtarget_n = tf.placeholder(name='target', shape=[None], dtype=tf.float32)
+
+        # Build network
+        net = self.sy_ob_no
+        net = tf.layers.dense(net, 64, activation=tf.nn.relu)
+        net = tf.layers.dense(net, 64, activation=tf.nn.relu)
+        self.output = tf.squeeze(tf.layers.dense(net, 1))
+
+        # Training op
+        loss = tf.losses.mean_squared_error(labels=self.sy_vtarget_n, predictions=self.output)
+        self.training_op = tf.train.AdamOptimizer(5e-3).minimize(loss)
+
+    def predict(self, ob_no):
+        sess = tf.get_default_session()
+        return sess.run(self.output, feed_dict={self.sy_ob_no: ob_no})
+
+    def fit(self, ob_no, vtarget_n):
+        sess = tf.get_default_session()
+        sess.run(self.training_op, feed_dict={self.sy_ob_no: ob_no,
+                                              self.sy_vtarget_n: vtarget_n})
 
 def lrelu(x, leak=0.2):
     f1 = 0.5 * (1 + leak)
@@ -204,7 +225,7 @@ def main_cartpole(n_iter=100, gamma=1.0, min_timesteps_per_batch=1000, stepsize=
 def main_pendulum(logdir, seed, n_iter, gamma, min_timesteps_per_batch, initial_stepsize, desired_kl, vf_type, vf_params, animate=False):
     tf.set_random_seed(seed)
     np.random.seed(seed)
-    env = gym.make("Pendulum-v0")
+    env = gym.make("InvertedPendulum-v1")
     ob_dim = env.observation_space.shape[0]
     ac_dim = env.action_space.shape[0]
     logz.configure_output_dir(logdir)
@@ -213,8 +234,24 @@ def main_pendulum(logdir, seed, n_iter, gamma, min_timesteps_per_batch, initial_
     elif vf_type == 'nn':
         vf = NnValueFunction(ob_dim=ob_dim, **vf_params)
 
+    # Placeholders
+    sy_ob_no = tf.placeholder(name='ob', shape=[None, ob_dim], dtype=tf.float32)
+    sy_ac_na = tf.placeholder(name='ac', shape=[None, ac_dim], dtype=tf.float32)
+    sy_adv_n = tf.placeholder(name='adv', shape=[None], dtype=tf.float32)
 
-    YOUR_CODE_HERE
+    # Build network
+    sy_h = tf.layers.dense(sy_ob_no, 64, activation=tf.nn.relu)
+    sy_h = tf.layers.dense(sy_h, 64, activation=tf.nn.relu)
+    sy_mean_na = tf.layers.dense(sy_h, ac_dim)
+    sy_logstd_a = tf.get_variable('logstd', shape=[ac_dim], dtype=tf.float32)
+
+    # Sample action
+    sy_sampled_ac = sy_mean_na + sy_logstd_a * tf.random_normal(tf.shape(sy_mean_na))
+
+    # Compute gaussian logprob
+    sy_logprob_n = -0.5 * tf.reduce_sum(sy_logstd_a)
+    sy_logprob_n += -0.5 * tf.reduce_sum(((sy_ac_na - sy_mean_na)
+                                          / tf.exp(sy_logstd_a)) ** 2, axis=1)
 
 
     sy_surr = - tf.reduce_mean(sy_adv_n * sy_logprob_n) # Loss function that we'll differentiate to get the policy gradient ("surr" is for "surrogate loss")
@@ -232,25 +269,79 @@ def main_pendulum(logdir, seed, n_iter, gamma, min_timesteps_per_batch, initial_
     for i in range(n_iter):
         print("********** Iteration %i ************"%i)
 
-        YOUR_CODE_HERE
+        # Collect paths until we have enough timesteps
+        timesteps_this_batch = 0
+        paths = []
+        while True:
+            ob = env.reset()
+            terminated = False
+            obs, acs, rewards = [], [], []
+            animate_this_episode=(len(paths)==0 and (i % 10 == 0) and animate)
+            while True:
+                if animate_this_episode:
+                    env.render()
+                obs.append(ob)
+                ac = sess.run(sy_sampled_ac, feed_dict={sy_ob_no : ob[None]})
+                ac = ac[0]
+                acs.append(ac)
+                ob, rew, done, _ = env.step(ac)
+                rewards.append(rew)
+                if done:
+                    break
+            path = {"observation" : np.array(obs), "terminated" : terminated,
+                    "reward" : np.array(rewards), "action" : np.array(acs)}
+            paths.append(path)
+            timesteps_this_batch += pathlength(path)
+            if timesteps_this_batch > min_timesteps_per_batch:
+                break
+        total_timesteps += timesteps_this_batch
+        # Estimate advantage function
+        vtargs, vpreds, advs = [], [], []
+        for path in paths:
+            rew_t = path["reward"]
+            return_t = discount(rew_t, gamma)
+            vpred_t = vf.predict(path["observation"])
+            adv_t = return_t - vpred_t
+            # adv_t = return_t
+            advs.append(adv_t)
+            vtargs.append(return_t)
+            vpreds.append(vpred_t)
 
-        if kl > desired_kl * 2: 
-            stepsize /= 1.5
-            print('stepsize -> %s'%stepsize)
-        elif kl < desired_kl / 2: 
-            stepsize *= 1.5
-            print('stepsize -> %s'%stepsize)
-        else:
-            print('stepsize OK')
+        # Build arrays for policy update
+        ob_no = np.concatenate([path["observation"] for path in paths])
+        ac_na = np.concatenate([path["action"] for path in paths])
+        adv_n = np.concatenate(advs)
+        standardized_adv_n = (adv_n - adv_n.mean()) / (adv_n.std() + 1e-8)
+        vtarg_n = np.concatenate(vtargs)
+        vpred_n = np.concatenate(vpreds)
+
+        # Update value function
+        vf.fit(ob_no, vtarg_n)
+
+        # Update policy
+        oldmean_na, oldlogstd_a, _ = sess.run([sy_mean_na, sy_logstd_a, update_op],
+                                              feed_dict={sy_ob_no: ob_no,
+                                                         sy_ac_na: ac_na,
+                                                         sy_adv_n: standardized_adv_n,
+                                                         sy_stepsize: initial_stepsize})
+
+        # if kl > desired_kl * 2: 
+        #     stepsize /= 1.5
+        #     print('stepsize -> %s'%stepsize)
+        # elif kl < desired_kl / 2: 
+        #     stepsize *= 1.5
+        #     print('stepsize -> %s'%stepsize)
+        # else:
+        #     print('stepsize OK')
 
 
         # Log diagnostics
         logz.log_tabular("EpRewMean", np.mean([path["reward"].sum() for path in paths]))
         logz.log_tabular("EpLenMean", np.mean([pathlength(path) for path in paths]))
-        logz.log_tabular("KLOldNew", kl)
-        logz.log_tabular("Entropy", ent)
-        logz.log_tabular("EVBefore", explained_variance_1d(vpred_n, vtarg_n))
-        logz.log_tabular("EVAfter", explained_variance_1d(vf.predict(ob_no), vtarg_n))
+        # logz.log_tabular("KLOldNew", kl)
+        # logz.log_tabular("Entropy", ent)
+        # logz.log_tabular("EVBefore", explained_variance_1d(vpred_n, vtarg_n))
+        # logz.log_tabular("EVAfter", explained_variance_1d(vf.predict(ob_no), vtarg_n))
         logz.log_tabular("TimestepsSoFar", total_timesteps)
         # If you're overfitting, EVAfter will be way larger than EVBefore.
         # Note that we fit value function AFTER using it to compute the advantage function to avoid introducing bias
